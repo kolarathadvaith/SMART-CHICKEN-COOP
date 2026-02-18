@@ -1,0 +1,108 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include "DHT.h"
+
+/* === CONFIG === */
+const char* ssid = "dhoniconnect";
+const char* password = "77777777";
+#define DHTPIN 4
+#define DHTTYPE DHT22
+#define FAN_PIN 5
+#define TEMP_THRESHOLD 30.0
+
+DHT dht(DHTPIN, DHTTYPE);
+WebServer server(80);
+
+float temperature = 0, humidity = 0;
+bool fanState = false;
+bool manualMode = false;
+float tempHistory[10] = {0};
+int hIdx = 0;
+
+/* === THE ULTIMATE DASHBOARD === */
+void handleRoot() {
+  String p = R"====(
+<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>GUARDIAN PRO</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Inter:wght@300;500&display=swap" rel="stylesheet">
+<style>
+:root{--neon:#00f2fe;--bg:#050a0f;--card:rgba(255,255,255,0.03)}
+body{margin:0;background:var(--bg);color:#fff;font-family:'Inter',sans-serif;padding:15px;display:flex;justify-content:center}
+.container{width:100%;max-width:450px}
+header{text-align:center;margin-bottom:20px}
+h1{font-family:'Orbitron';font-size:1.2rem;color:var(--neon);text-shadow:0 0 10px rgba(0,242,254,0.5)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:15px}
+.glass{background:var(--card);backdrop-filter:blur(15px);border:1px solid rgba(255,255,255,0.1);border-radius:20px;padding:20px;text-align:center}
+.full{grid-column:1/-1}.val{font-family:'Orbitron';font-size:2.2rem;margin:10px 0;color:#fff}
+.lab{font-size:0.7rem;letter-spacing:1px;opacity:0.6;text-transform:uppercase}
+.btn{background:none;border:2px solid var(--neon);color:var(--neon);padding:8px 20px;border-radius:50px;cursor:pointer;font-family:'Orbitron';font-size:0.7rem;transition:0.3s}
+.btn.active{background:var(--neon);color:#000;box-shadow:0 0 15px var(--neon)}
+#alert{background:rgba(255,0,0,0.2);border:1px solid #ff4b2b;padding:10px;border-radius:10px;margin-bottom:15px;display:none;color:#ff4b2b;font-weight:bold;text-align:center;animation:pulse 1s infinite}
+@keyframes pulse{0%{opacity:1}50%{opacity:0.5}100%{opacity:1}}
+</style></head>
+<body><div class="container">
+<header><h1>COOP GUARDIAN PRO</h1><div id="alert">⚠️ HEAT STRESS DETECTED</div></header>
+<div class="grid">
+<div class="glass"><div class="lab">Temp</div><div class="val" id="t">--</div></div>
+<div class="glass"><div class="lab">Humid</div><div class="val" id="h">--</div></div>
+<div class="glass full" style="display:flex;justify-content:space-between;align-items:center">
+<div class="lab">Manual Fan</div><button id="fanBtn" class="btn" onclick="toggleFan()">OFF</button></div>
+<div class="glass full"><canvas id="ch" height="180"></canvas></div>
+</div></div>
+<script>
+let ctx=document.getElementById('ch').getContext('2d'),chart=new Chart(ctx,{type:'line',data:{labels:[1,2,3,4,5,6,7,8,9,10],datasets:[{data:[],borderColor:'#00f2fe',tension:0.4,fill:true,backgroundColor:'rgba(0,242,254,0.1)',pointRadius:0}]},options:{plugins:{legend:{display:0}},scales:{y:{grid:{color:'#222'},ticks:{color:'#555'}},x:{display:0}}}});
+function toggleFan(){fetch('/toggle').then(()=>update());}
+function update(){fetch('/data').then(r=>r.json()).then(d=>{
+document.getElementById('t').innerText=d.t.toFixed(1)+'°C';
+document.getElementById('h').innerText=d.h.toFixed(1)+'%';
+document.getElementById('alert').style.display=d.t>=30?'block':'none';
+let b=document.getElementById('fanBtn');b.innerText=d.f?'ON':'OFF';b.className=d.f?'btn active':'btn';
+chart.data.datasets[0].data=d.hi;chart.update('none');});}
+setInterval(update,2000);
+</script></body></html>)====";
+  server.send(200, "text/html", p);
+}
+
+/* === SETUP & CORE LOGIC === */
+void setup() {
+  Serial.begin(115200);
+  pinMode(FAN_PIN, OUTPUT);
+  dht.begin();
+  WiFi.begin(ssid, password);
+  while(WiFi.status()!=WL_CONNECTED) delay(500);
+  
+  server.on("/", handleRoot);
+  server.on("/toggle", [](){ 
+    manualMode = !manualMode;
+    fanState = manualMode;
+    server.send(200); 
+  });
+  server.on("/data", [](){
+    String j = "{\"t\":"+String(temperature)+",\"h\":"+String(humidity)+",\"f\":"+(fanState?"true":"false")+",\"hi\":[";
+    for(int i=0;i<10;i++) j+=String(tempHistory[i])+(i<9?",":"");
+    j+="]}";
+    server.send(200, "application/json", j);
+  });
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+  static unsigned long last = 0;
+  if (millis() - last > 2000) {
+    last = millis();
+    float t = dht.readTemperature();
+    float h = dht.readHumidity();
+    if(!isnan(t)) temperature = t;
+    if(!isnan(h)) humidity = h;
+    tempHistory[hIdx] = temperature;
+    hIdx = (hIdx + 1) % 10;
+
+    // Logic: Automatic if not in manual mode
+    if(!manualMode) {
+      fanState = (temperature >= TEMP_THRESHOLD);
+    }
+    digitalWrite(FAN_PIN, fanState);
+  }
+}
